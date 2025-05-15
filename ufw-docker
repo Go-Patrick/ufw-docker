@@ -449,7 +449,7 @@ case "$ufw_action" in
             die "\"delete\" command only support removing allowed rules"
         fi
         ;&
-    list|allow)
+    allow)
         shift || true
         INSTANCE_ID="${1:?Docker instance name/ID cannot be empty.}"
         INSTANCE_NAME="$(ufw-docker--instance-name "$INSTANCE_ID")"
@@ -479,6 +479,30 @@ case "$ufw_action" in
         NETWORK="${1:-}"
         INSTANCE_PORT="${INSTANCE_PORT%/*}"
         "ufw-docker--$ufw_action" "$INSTANCE_NAME" "$INSTANCE_PORT" "$PROTO" "$NETWORK" "$SOURCE_IP"
+        ;;
+    list)
+        shift || true
+
+        INSTANCE_ID="${1:?Docker instance name/ID cannot be empty.}"
+        INSTANCE_NAME="$(ufw-docker--instance-name "$INSTANCE_ID")"
+        shift || true
+
+        INSTANCE_PORT="${1:-}"
+        if [[ -n "$INSTANCE_PORT" && ! "$INSTANCE_PORT" =~ [0-9]+(/(tcp|udp))? ]]; then
+            die "invalid port syntax: \"$INSTANCE_PORT\"."
+        fi
+
+        PROTO="$DEFAULT_PROTO"
+        if [[ "$INSTANCE_PORT" = */udp ]]; then
+            PROTO=udp
+        fi
+        shift || true
+
+        NETWORK="${1:-}"
+
+        INSTANCE_PORT="${INSTANCE_PORT%/*}"
+
+        "ufw-docker--$ufw_action" "$INSTANCE_NAME" "$INSTANCE_PORT" "$PROTO" "$NETWORK"
         ;;
     service|raw-command|add-service-rule)
         shift || true
