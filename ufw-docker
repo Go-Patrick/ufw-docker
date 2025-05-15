@@ -32,17 +32,16 @@ function ufw-docker--list() {
     local INSTANCE_PORT="${2:-}"
     local PROTO="${3:-${DEFAULT_PROTO}}"
     local NETWORK="${4:-}"
-
     if [[ -z "$INSTANCE_PORT" ]]; then
         INSTANCE_PORT="[[:digit:]]\\+"
         PROTO="\\(tcp\\|udp\\)"
     fi
-
     if [[ -z "$NETWORK" ]]; then
        NETWORK="[[:graph:]]*"
     fi
-
-    ufw status numbered | grep "# allow ${INSTANCE_NAME}\\( ${INSTANCE_PORT}\\/${PROTO}\\)\\( ${NETWORK}\\)\$" ||  \
+    # Modified grep pattern to match "bridge from" format
+    ufw status numbered | grep "# allow ${INSTANCE_NAME}\\( ${INSTANCE_PORT}\\/${PROTO}\\)\\( bridge from .*\\)\$" || \
+    ufw status numbered | grep "# allow ${INSTANCE_NAME}\\( ${INSTANCE_PORT}\\/${PROTO}\\)\\( ${NETWORK}\\)\$" || \
     ufw status numbered | grep "# allow ${INSTANCE_NAME}\\( ${INSTANCE_PORT}\\/${PROTO}\\)\$" || \
     ufw status numbered | grep "# allow ${INSTANCE_NAME}\$"
 }
