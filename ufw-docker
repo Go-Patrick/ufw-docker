@@ -57,24 +57,86 @@ function ufw-docker--delete() {
     done
 }
 
-# Modified allow function to accept source IP
+function ufw-docker--add-rule() {
+    local INSTANCE_NAME="$1"
+    local INSTANCE_IP_ADDRESS="$2"
+    local PORT="$3"
+    local PROTO="$4"
+    local NETWORK="${5:-}"
+    local SOURCE_IP="${6:-}"
+    
+    declare comment
+    # Show what we're going to do
+    if [[ -n "$SOURCE_IP" ]]; then
+        echo "allow ${INSTANCE_NAME} ${PORT}/${PROTO} ${NETWORK} from ${SOURCE_IP}"
+    else
+        echo "allow ${INSTANCE_NAME} ${PORT}/${PROTO} ${NETWORK} from anywhere"
+    fi
+    
+    # Build the UFW options
+    typeset -a UFW_OPTS
+    UFW_OPTS=(route allow proto "${PROTO}")
+    
+    # If source IP is provided, use it; otherwise default to any
+    if [[ -n "$SOURCE_IP" ]]; then
+        UFW_OPTS+=(from "$SOURCE_IP" to "$INSTANCE_IP_ADDRESS")
+    else
+        UFW_OPTS+=(from any to "$INSTANCE_IP_ADDRESS")
+    fi
+    
+    # Build the comment for the rule
+    comment="allow ${INSTANCE_NAME}"
+    [[ -n "$PORT" ]] && {
+        UFW_OPTS+=(port "${PORT}")
+        comment="$comment ${PORT}/${PROTO}"
+    }
+    [[ -n "$NETWORK" ]] && {
+        comment="$comment ${NETWORK}"
+    }
+    [[ -n "$SOURCE_IP" ]] && {
+        comment="$comment from ${SOURCE_IP}"
+    }
+    
+    UFW_OPTS+=(comment "$comment")
+    
+    # Check if the rule already exists
+    if ufw-docker--list "$INSTANCE_NAME" "$PORT" "$PROTO" "$NETWORK" "$SOURCE_IP" &>/dev/null; then
+        ufw --dry-run "${UFW_OPTS[@]}" | grep "^Skipping" && return 0
+        err "Remove outdated rule."
+        ufw-docker--delete "$INSTANCE_NAME" "$PORT" "$PROTO" "$NETWORK" "$SOURCE_IP"
+    fi
+    
+    # Execute the UFW command
+    echo ufw "${UFW_OPTS[@]}"
+    ufw "${UFW_OPTS[@]}"
+}
+
+# Function to allow access to a container
 function ufw-docker--allow() {
     local INSTANCE_NAME="$1"
-    local INSTANCE_PORT="$2"
-    local PROTO="$3"
+    local INSTANCE_PORT="${2:-}"
+    local PROTO="${3:-}"
     local NETWORK="${4:-}"
     local SOURCE_IP="${5:-}"
     
+    # Verify container exists
     docker inspect "$INSTANCE_NAME" &>/dev/null ||
         die "Docker instance \"$INSTANCE_NAME\" doesn't exist."
+    
+    # Get container IP addresses
     mapfile -t INSTANCE_IP_ADDRESSES < <(docker inspect --format='{{range .NetworkSettings.Networks}}{{.IPAddress}}{{"\n"}}{{end}}' "$INSTANCE_NAME" 2>/dev/null | remove_blank_lines)
     [[ -z "${INSTANCE_IP_ADDRESSES:-}" ]] && die "Could not find a running instance \"$INSTANCE_NAME\"."
+    
+    # Get container network names
     mapfile -t INSTANCE_NETWORK_NAMES < <(docker inspect --format='{{range $k, $v := .NetworkSettings.Networks}}{{printf "%s\n" $k}}{{end}}' "$INSTANCE_NAME" 2>/dev/null | remove_blank_lines)
+    
+    # Get container published ports
     mapfile -t PORT_PROTO_LIST < <(docker inspect --format='{{range $p, $conf := .NetworkSettings.Ports}}{{with $conf}}{{$p}}{{"\n"}}{{end}}{{end}}' "$INSTANCE_NAME" | remove_blank_lines)
     if [[ -z "${PORT_PROTO_LIST:-}" ]]; then
         err "\"$INSTANCE_NAME\" doesn't have any published ports."
         return 1
     fi
+    
     RETVAL=1
     for PORT_PROTO in "${PORT_PROTO_LIST[@]}"; do
         if [[ -z "$INSTANCE_PORT" || "$PORT_PROTO" = "${INSTANCE_PORT}/${PROTO}" ]]; then
@@ -90,57 +152,12 @@ function ufw-docker--allow() {
             done
         fi
     done
+    
     if [[ "$RETVAL" -ne 0 ]]; then
         err "Fail to add rule(s), cannot find the published port ${INSTANCE_PORT}/${PROTO} of instance \"${INSTANCE_NAME}\" or cannot update outdated rule(s)."
     fi
+    
     return "$RETVAL"
-}
-
-# Modified add-rule function to use the source IP
-function ufw-docker--add-rule() {
-    local INSTANCE_NAME="$1"
-    local INSTANCE_IP_ADDRESS="$2"
-    local PORT="$3"
-    local PROTO="$4"
-    local NETWORK="${5:-}"
-    local SOURCE_IP="${6:-}"
-    
-    declare comment
-    echo "allow ${INSTANCE_NAME} ${PORT}/${PROTO} ${NETWORK} ${SOURCE_IP:+from $SOURCE_IP}"
-    
-    typeset -a UFW_OPTS
-    UFW_OPTS=(route allow proto "${PROTO}")
-    
-    # If source IP is provided, use it; otherwise default to any
-    if [[ -n "$SOURCE_IP" ]]; then
-        UFW_OPTS+=(from "$SOURCE_IP" to "$INSTANCE_IP_ADDRESS")
-    else
-        UFW_OPTS+=(from any to "$INSTANCE_IP_ADDRESS")
-    fi
-    
-    comment="allow ${INSTANCE_NAME}"
-    [[ -n "$PORT" ]] && {
-        UFW_OPTS+=(port "${PORT}")
-        comment="$comment ${PORT}/${PROTO}"
-    }
-    [[ -n "$NETWORK" ]] && {
-        comment="$comment ${NETWORK}"
-    }
-    [[ -n "$SOURCE_IP" ]] && {
-        comment="$comment from ${SOURCE_IP}"
-    }
-    
-    UFW_OPTS+=(comment "$comment")
-    
-    # We need to modify the list function to include SOURCE_IP for proper rule matching
-    if ufw-docker--list "$INSTANCE_NAME" "$PORT" "$PROTO" "$NETWORK" "$SOURCE_IP" &>/dev/null; then
-        ufw --dry-run "${UFW_OPTS[@]}" | grep "^Skipping" && return 0
-        err "Remove outdated rule."
-        ufw-docker--delete "$INSTANCE_NAME" "$PORT" "$PROTO" "$NETWORK" "$SOURCE_IP"
-    fi
-    
-    echo ufw "${UFW_OPTS[@]}"
-    ufw "${UFW_OPTS[@]}"
 }
 
 function ufw-docker--add-service-rule() {
@@ -450,20 +467,39 @@ case "$ufw_action" in
         ;&
     allow)
         shift || true
+        # Special case for just 'list' with no arguments
+        if [[ "$ufw_action" == "list" && $# -eq 0 ]]; then
+            # List all rules with our comment format
+            ufw status numbered | grep -E "^\\[[0-9]+\\]" | grep -E "### allow " || exit 0
+            exit 0
+        fi
+        
         INSTANCE_ID="${1:?Docker instance name/ID cannot be empty.}"
         INSTANCE_NAME="$(ufw-docker--instance-name "$INSTANCE_ID")"
         shift || true
+        
+        # For list command with just container name
+        if [[ "$ufw_action" == "list" && $# -eq 0 ]]; then
+            ufw status numbered | grep -E "^\\[[0-9]+\\]" | grep -E "### allow ${INSTANCE_NAME}( |$)" || exit 0
+            exit 0
+        fi
         
         # Check if we have a "from" syntax
         SOURCE_IP=""
         if [[ "$1" == "from" ]]; then
             shift || true
-            SOURCE_IP="${1:?Source IP cannot be empty when using 'from' syntax.}"
-            # Validate IP format (basic validation)
-            if ! [[ $SOURCE_IP =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?$ ]]; then
-                die "Invalid source IP format: \"$SOURCE_IP\""
+            if [[ "$1" == "any" || "$1" == "anywhere" ]]; then
+                # Handle "from any" or "from anywhere" syntax - leave SOURCE_IP empty
+                SOURCE_IP=""
+                shift || true
+            else
+                SOURCE_IP="${1:?Source IP cannot be empty when using 'from' syntax.}"
+                # Validate IP format (basic validation)
+                if ! [[ $SOURCE_IP =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?$ ]]; then
+                    die "Invalid source IP format: \"$SOURCE_IP\""
+                fi
+                shift || true
             fi
-            shift || true
         fi
         
         INSTANCE_PORT="${1:-}"
